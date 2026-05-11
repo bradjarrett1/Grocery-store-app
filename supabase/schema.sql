@@ -57,13 +57,15 @@ CREATE POLICY "Users can delete own categories"
   USING (auth.uid() = user_id);
 
 -- Insert default system categories
+-- Order follows a logical grocery store flow: perimeter first (produce → bakery/deli → meat → frozen → dairy),
+-- then interior aisles (pantry → beverages → snacks), then front-of-store sections.
 INSERT INTO categories (name, color, icon, default_aisle_order, is_system) VALUES
   ('Produce', '#4ade80', 'leaf', 1, true),
-  ('Dairy', '#60a5fa', 'milk', 2, true),
+  ('Bakery', '#fbbf24', 'bread-slice', 2, true),
   ('Meat & Seafood', '#f87171', 'drumstick', 3, true),
-  ('Bakery', '#fbbf24', 'bread-slice', 4, true),
-  ('Pantry', '#a78bfa', 'jar', 5, true),
-  ('Frozen', '#38bdf8', 'snowflake', 6, true),
+  ('Frozen', '#38bdf8', 'snowflake', 4, true),
+  ('Dairy', '#60a5fa', 'milk', 5, true),
+  ('Pantry', '#a78bfa', 'jar', 6, true),
   ('Beverages', '#fb923c', 'glass-water', 7, true),
   ('Snacks', '#facc15', 'cookie', 8, true),
   ('Health & Beauty', '#ec4899', 'heart-pulse', 9, true),
@@ -302,3 +304,24 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER update_list_counts_on_check
   AFTER INSERT OR UPDATE OR DELETE ON list_items
   FOR EACH ROW EXECUTE FUNCTION update_shopping_list_counts();
+
+-- ============================================================
+-- MIGRATION: Update category aisle order to logical store flow
+-- Run this in the Supabase SQL editor if you already applied
+-- the initial schema and categories are already seeded.
+-- ============================================================
+-- UPDATE categories SET default_aisle_order = CASE name
+--   WHEN 'Produce'        THEN 1
+--   WHEN 'Bakery'         THEN 2
+--   WHEN 'Meat & Seafood' THEN 3
+--   WHEN 'Frozen'         THEN 4
+--   WHEN 'Dairy'          THEN 5
+--   WHEN 'Pantry'         THEN 6
+--   WHEN 'Beverages'      THEN 7
+--   WHEN 'Snacks'         THEN 8
+--   WHEN 'Health & Beauty' THEN 9
+--   WHEN 'Household'      THEN 10
+--   WHEN 'Other'          THEN 11
+--   ELSE default_aisle_order
+-- END
+-- WHERE is_system = true;

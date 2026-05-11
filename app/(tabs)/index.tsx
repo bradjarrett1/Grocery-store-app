@@ -6,6 +6,7 @@ import {
   SafeAreaView,
   TouchableOpacity,
   SectionList,
+  ScrollView,
   Alert,
   ImageBackground,
   Modal,
@@ -48,6 +49,14 @@ export default function ShoppingScreen() {
   const [loading, setLoading] = useState(true);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [totalSpent, setTotalSpent] = useState('');
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [quickAddName, setQuickAddName] = useState('');
+  const [quickAddCategoryId, setQuickAddCategoryId] = useState<string>('');
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingItem, setEditingItem] = useState<ListItem | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editQuantity, setEditQuantity] = useState('');
+  const [editCategoryId, setEditCategoryId] = useState<string>('');
   const user = useAuthStore((state) => state.user);
 
   useFocusEffect(
@@ -67,6 +76,8 @@ export default function ShoppingScreen() {
 
     if (data) {
       setCategories(data);
+      const other = data.find((c) => c.name === 'Other');
+      if (other) setQuickAddCategoryId(other.id);
     }
   }
 
@@ -145,6 +156,81 @@ export default function ShoppingScreen() {
     if (!activeList) return;
     setTotalSpent('');
     setShowCompleteModal(true);
+  }
+
+  function openEditModal(item: ListItem) {
+    setEditingItem(item);
+    setEditName(item.item_name);
+    setEditQuantity(item.quantity ?? '');
+    setEditCategoryId(item.category_id ?? '');
+    setShowEditModal(true);
+  }
+
+  async function saveEditItem() {
+    if (!editingItem || !editName.trim()) return;
+
+    const { error } = await supabase
+      .from('list_items')
+      .update({
+        item_name: editName.trim(),
+        quantity: editQuantity.trim() || null,
+        category_id: editCategoryId || null,
+      })
+      .eq('id', editingItem.id);
+
+    if (error) {
+      Alert.alert('Error', 'Failed to update item');
+      return;
+    }
+
+    setShowEditModal(false);
+    setEditingItem(null);
+    loadActiveList();
+  }
+
+  async function deleteItem(itemId: string) {
+    Alert.alert('Delete Item', 'Remove this item from the list?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          const { error } = await supabase
+            .from('list_items')
+            .delete()
+            .eq('id', itemId);
+
+          if (error) {
+            Alert.alert('Error', 'Failed to delete item');
+            return;
+          }
+
+          setShowEditModal(false);
+          setEditingItem(null);
+          loadActiveList();
+        },
+      },
+    ]);
+  }
+
+  async function addQuickItem() {
+    if (!activeList || !quickAddName.trim()) return;
+
+    const { error } = await supabase.from('list_items').insert({
+      list_id: activeList.id,
+      item_name: quickAddName.trim(),
+      category_id: quickAddCategoryId || null,
+      checked: false,
+    });
+
+    if (error) {
+      Alert.alert('Error', 'Failed to add item');
+      return;
+    }
+
+    setQuickAddName('');
+    setShowQuickAdd(false);
+    loadActiveList();
   }
 
   async function confirmComplete() {
@@ -329,44 +415,223 @@ export default function ShoppingScreen() {
           </KeyboardAvoidingView>
         </Modal>
 
-        <SectionList
-          sections={sections}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.itemRow}
-              onPress={() => toggleItem(item.id, item.checked)}
-            >
-              <View
-                style={[
-                  styles.checkbox,
-                  item.checked && styles.checkboxChecked,
-                ]}
+        <View style={styles.listContainer}>
+          <SectionList
+            sections={sections}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.itemRow}
+                onPress={() => toggleItem(item.id, item.checked)}
+                onLongPress={() => openEditModal(item)}
+                delayLongPress={400}
               >
-                {item.checked && <Text style={styles.checkmark}>✓</Text>}
-              </View>
-              <View style={styles.itemInfo}>
-                <Text
+                <View
                   style={[
-                    styles.itemName,
-                    item.checked && styles.itemNameChecked,
+                    styles.checkbox,
+                    item.checked && styles.checkboxChecked,
                   ]}
                 >
-                  {item.item_name}
-                </Text>
-                {item.quantity && (
-                  <Text style={styles.itemQuantity}>{item.quantity}</Text>
-                )}
+                  {item.checked && <Text style={styles.checkmark}>✓</Text>}
+                </View>
+                <View style={styles.itemInfo}>
+                  <Text
+                    style={[
+                      styles.itemName,
+                      item.checked && styles.itemNameChecked,
+                    ]}
+                  >
+                    {item.item_name}
+                  </Text>
+                  {item.quantity && (
+                    <Text style={styles.itemQuantity}>{item.quantity}</Text>
+                  )}
+                </View>
+                <Text style={styles.holdHint}>hold to edit</Text>
+              </TouchableOpacity>
+            )}
+            renderSectionHeader={({ section: { title, color } }) => (
+              <View style={[styles.sectionHeader, { backgroundColor: color }]}>
+                <Text style={styles.sectionTitle}>{title}</Text>
               </View>
-            </TouchableOpacity>
-          )}
-          renderSectionHeader={({ section: { title, color } }) => (
-            <View style={[styles.sectionHeader, { backgroundColor: color }]}>
-              <Text style={styles.sectionTitle}>{title}</Text>
+            )}
+            contentContainerStyle={styles.list}
+          />
+
+          <TouchableOpacity
+            style={styles.fab}
+            onPress={() => setShowQuickAdd(true)}
+          >
+            <Text style={styles.fabText}>+</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Quick Add Modal */}
+        <Modal
+          visible={showQuickAdd}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowQuickAdd(false)}
+        >
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={styles.modalOverlay}
+          >
+            <TouchableOpacity
+              style={StyleSheet.absoluteFill}
+              activeOpacity={1}
+              onPress={() => setShowQuickAdd(false)}
+            />
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>Add Item</Text>
+              <TextInput
+                style={styles.quickAddInput}
+                placeholder="Item name..."
+                value={quickAddName}
+                onChangeText={setQuickAddName}
+                autoFocus
+                returnKeyType="done"
+                onSubmitEditing={addQuickItem}
+              />
+              <Text style={styles.categoryLabel}>Category</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.categoryScroll}
+                contentContainerStyle={styles.categoryScrollContent}
+              >
+                {categories.map((cat) => (
+                  <TouchableOpacity
+                    key={cat.id}
+                    style={[
+                      styles.categoryChip,
+                      { borderColor: cat.color },
+                      quickAddCategoryId === cat.id && { backgroundColor: cat.color },
+                    ]}
+                    onPress={() => setQuickAddCategoryId(cat.id)}
+                  >
+                    <Text
+                      style={[
+                        styles.categoryChipText,
+                        quickAddCategoryId === cat.id && styles.categoryChipTextSelected,
+                      ]}
+                    >
+                      {cat.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              <View style={styles.modalButtons}>
+                <TouchableOpacity
+                  style={styles.modalButtonCancel}
+                  onPress={() => {
+                    setQuickAddName('');
+                    setShowQuickAdd(false);
+                  }}
+                >
+                  <Text style={styles.modalButtonCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.modalButtonComplete,
+                    !quickAddName.trim() && styles.modalButtonDisabled,
+                  ]}
+                  onPress={addQuickItem}
+                  disabled={!quickAddName.trim()}
+                >
+                  <Text style={styles.modalButtonCompleteText}>Add Item</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          )}
-          contentContainerStyle={styles.list}
-        />
+          </KeyboardAvoidingView>
+        </Modal>
+        {/* Edit Item Modal */}
+        <Modal
+          visible={showEditModal}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowEditModal(false)}
+        >
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={styles.modalOverlay}
+          >
+            <TouchableOpacity
+              style={StyleSheet.absoluteFill}
+              activeOpacity={1}
+              onPress={() => setShowEditModal(false)}
+            />
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>Edit Item</Text>
+
+              <Text style={styles.categoryLabel}>Name</Text>
+              <TextInput
+                style={styles.quickAddInput}
+                value={editName}
+                onChangeText={setEditName}
+                autoFocus
+                returnKeyType="done"
+              />
+
+              <Text style={styles.categoryLabel}>Quantity</Text>
+              <TextInput
+                style={[styles.quickAddInput, { marginBottom: 16 }]}
+                placeholder="e.g. 2 lbs, 1 dozen"
+                value={editQuantity}
+                onChangeText={setEditQuantity}
+                returnKeyType="done"
+              />
+
+              <Text style={styles.categoryLabel}>Category</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.categoryScroll}
+                contentContainerStyle={styles.categoryScrollContent}
+              >
+                {categories.map((cat) => (
+                  <TouchableOpacity
+                    key={cat.id}
+                    style={[
+                      styles.categoryChip,
+                      { borderColor: cat.color },
+                      editCategoryId === cat.id && { backgroundColor: cat.color },
+                    ]}
+                    onPress={() => setEditCategoryId(cat.id)}
+                  >
+                    <Text
+                      style={[
+                        styles.categoryChipText,
+                        editCategoryId === cat.id && styles.categoryChipTextSelected,
+                      ]}
+                    >
+                      {cat.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              <View style={styles.modalButtons}>
+                <TouchableOpacity
+                  style={styles.deleteButton}
+                  onPress={() => editingItem && deleteItem(editingItem.id)}
+                >
+                  <Text style={styles.deleteButtonText}>Delete</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.modalButtonComplete,
+                    !editName.trim() && styles.modalButtonDisabled,
+                  ]}
+                  onPress={saveEditItem}
+                  disabled={!editName.trim()}
+                >
+                  <Text style={styles.modalButtonCompleteText}>Save</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
       </SafeAreaView>
     </ImageBackground>
   );
@@ -470,12 +735,16 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textAlign: 'center',
   },
+  listContainer: {
+    flex: 1,
+  },
   list: {
     paddingBottom: 100,
   },
   sectionHeader: {
     padding: 14,
     paddingHorizontal: 20,
+    marginTop: 20,
   },
   sectionTitle: {
     fontSize: 14,
@@ -583,6 +852,91 @@ const styles = StyleSheet.create({
   modalButtons: {
     flexDirection: 'row',
     gap: 12,
+  },
+  fab: {
+    position: 'absolute',
+    bottom: 99,
+    right: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#10b981',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  fabText: {
+    color: '#ffffff',
+    fontSize: 30,
+    fontWeight: '300',
+    marginTop: -2,
+  },
+  quickAddInput: {
+    borderWidth: 1.5,
+    borderColor: '#d1d5db',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: '#1f2937',
+    marginBottom: 16,
+  },
+  categoryLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6b7280',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  categoryScroll: {
+    marginBottom: 20,
+  },
+  categoryScrollContent: {
+    gap: 8,
+    paddingRight: 4,
+  },
+  categoryChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    backgroundColor: 'transparent',
+  },
+  categoryChipText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#374151',
+  },
+  categoryChipTextSelected: {
+    color: '#ffffff',
+  },
+  modalButtonDisabled: {
+    backgroundColor: '#d1d5db',
+  },
+  holdHint: {
+    position: 'absolute',
+    bottom: 4,
+    right: 10,
+    fontSize: 11,
+    color: '#9ca3af',
+  },
+  deleteButton: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: '#ef4444',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  deleteButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#ef4444',
   },
   modalButtonCancel: {
     flex: 1,

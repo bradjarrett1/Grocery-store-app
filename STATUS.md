@@ -64,13 +64,15 @@ These features were intentionally left for Phase 2:
 - ⏳ Multiple store layouts
 - ⏳ Price tracking
 - ⏳ Budget tracking
+- ⏳ **AI voice input** — tap a mic button and speak items naturally ("add a gallon of milk to produce"); Claude API parses the utterance, infers the item name, quantity, and best-fit category, then inserts directly into the active list. Same flow for creating a new list from scratch by voice.
 
 ### Phase 3 (Future)
 - ⏳ Meal planning integration
 - ⏳ Shared lists (family collaboration)
-- ⏳ Voice input
 - ⏳ Barcode scanning
 - ⏳ Coupons/deals integration
+- ⏳ **GPS store detection + aisle-aware list** — use device GPS coordinates to identify which grocery store the user is in (match against a store location database or user-saved locations). Once detected, reorient the list into a directional flow (e.g. right-to-left of the store). Each item shows a suggested aisle number and row depth (back of store / middle / front). The list re-sorts dynamically so the user walks a single logical path with no backtracking.
+- ⏳ **In-store map mode** — an overhead store map (either a generic grid or a user-traced layout) that shows the user's live GPS position. As the user moves through the store, nearby unchecked items surface automatically. A floating HUD shows 2-3 items coming up in the current aisle. Tapping the HUD expands to the full sorted list. Items animate off the map as they are checked. This mode is toggled from the active shopping screen and degrades gracefully (falls back to sorted list) when GPS accuracy is low or indoors signal is weak.
 
 **Why not included?** These features would add 2-4 more weeks of development time. The MVP is fully functional without them.
 
