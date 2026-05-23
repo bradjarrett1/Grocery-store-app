@@ -325,3 +325,22 @@ CREATE TRIGGER update_list_counts_on_check
 --   ELSE default_aisle_order
 -- END
 -- WHERE is_system = true;
+
+-- ============================================================
+-- MIGRATION: Receipt scanning feature
+-- Run ALL of the following in your Supabase SQL editor.
+-- ============================================================
+
+-- 1. Add receipt fields to shopping_lists
+ALTER TABLE shopping_lists
+  ADD COLUMN IF NOT EXISTS total_spent NUMERIC(10,2),
+  ADD COLUMN IF NOT EXISTS store_name TEXT,
+  ADD COLUMN IF NOT EXISTS receipt_date DATE,
+  ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2),
+  ADD COLUMN IF NOT EXISTS tax NUMERIC(10,2),
+  ADD COLUMN IF NOT EXISTS receipt_image_uri TEXT;
+
+-- 2. Add price and receipt-origin flag to list_items
+ALTER TABLE list_items
+  ADD COLUMN IF NOT EXISTS price NUMERIC(10,2),
+  ADD COLUMN IF NOT EXISTS added_from_receipt BOOLEAN DEFAULT false;

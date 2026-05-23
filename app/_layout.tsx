@@ -33,6 +33,7 @@ export default function RootLayout() {
     >
       <Stack.Screen name="(auth)" />
       <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="receipt-review" options={{ presentation: 'modal', headerShown: false }} />
     </Stack>
   );
 }

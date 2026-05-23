@@ -13,10 +13,13 @@ import {
   TextInput,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
+import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../stores/useAuthStore';
+import { scanReceipt } from '../../lib/receiptScanner';
 
 interface ListItem {
   id: string;
@@ -49,6 +52,7 @@ export default function ShoppingScreen() {
   const [loading, setLoading] = useState(true);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [totalSpent, setTotalSpent] = useState('');
+  const [scanning, setScanning] = useState(false);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAddName, setQuickAddName] = useState('');
   const [quickAddCategoryId, setQuickAddCategoryId] = useState<string>('');
@@ -233,6 +237,46 @@ export default function ShoppingScreen() {
     loadActiveList();
   }
 
+  async function scanAndComplete() {
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Permission needed', 'Camera access is required to scan receipts.');
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      quality: 0.5,
+      base64: true,
+      allowsEditing: false,
+      exif: false,
+    });
+
+    if (result.canceled || !result.assets[0].base64) return;
+
+    const { uri, base64 } = result.assets[0];
+    setShowCompleteModal(false);
+    setScanning(true);
+
+    try {
+      const receiptData = await scanReceipt(base64!, items);
+      router.push({
+        pathname: '/receipt-review',
+        params: {
+          listId: activeList!.id,
+          imageUri: uri,
+          receiptJson: JSON.stringify(receiptData),
+          listItemsJson: JSON.stringify(items.map((i) => ({ id: i.id, item_name: i.item_name }))),
+          completeTrip: 'true',
+        },
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Receipt scan failed';
+      Alert.alert('Scan failed', message);
+    } finally {
+      setScanning(false);
+    }
+  }
+
   async function confirmComplete() {
     if (!activeList) return;
 
@@ -383,9 +427,17 @@ export default function ShoppingScreen() {
             />
             <View style={styles.modalContent}>
                 <Text style={styles.modalTitle}>Complete Shopping Trip?</Text>
-                <Text style={styles.modalSubtitle}>
-                  How much did you spend? (optional)
-                </Text>
+
+                <TouchableOpacity style={styles.scanReceiptButton} onPress={scanAndComplete}>
+                  <Text style={styles.scanReceiptIcon}>📷</Text>
+                  <View>
+                    <Text style={styles.scanReceiptTitle}>Scan Receipt</Text>
+                    <Text style={styles.scanReceiptSub}>AI extracts items, prices & totals</Text>
+                  </View>
+                </TouchableOpacity>
+
+                <Text style={styles.modalDividerText}>or enter total manually</Text>
+
                 <View style={styles.amountRow}>
                   <Text style={styles.currencySymbol}>$</Text>
                   <TextInput
@@ -394,7 +446,6 @@ export default function ShoppingScreen() {
                     value={totalSpent}
                     onChangeText={setTotalSpent}
                     keyboardType="decimal-pad"
-                    autoFocus
                   />
                 </View>
                 <View style={styles.modalButtons}>
@@ -545,6 +596,14 @@ export default function ShoppingScreen() {
             </View>
           </KeyboardAvoidingView>
         </Modal>
+        {/* Scanning overlay */}
+        {scanning && (
+          <View style={styles.scanningOverlay}>
+            <ActivityIndicator size="large" color="#10b981" />
+            <Text style={styles.scanningText}>Analyzing receipt...</Text>
+          </View>
+        )}
+
         {/* Edit Item Modal */}
         <Modal
           visible={showEditModal}
@@ -918,6 +977,35 @@ const styles = StyleSheet.create({
   modalButtonDisabled: {
     backgroundColor: '#d1d5db',
   },
+  scanReceiptButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1.5,
+    borderColor: '#10b981',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  scanReceiptIcon: { fontSize: 28 },
+  scanReceiptTitle: { fontSize: 15, fontWeight: '700', color: '#065f46' },
+  scanReceiptSub: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  modalDividerText: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: '#9ca3af',
+    marginBottom: 14,
+  },
+  scanningOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
+    zIndex: 99,
+  },
+  scanningText: { fontSize: 16, fontWeight: '600', color: '#1f2937' },
   holdHint: {
     position: 'absolute',
     bottom: 4,

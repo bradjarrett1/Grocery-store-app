@@ -131,6 +131,12 @@ export interface Database {
           completed_at: string | null
           total_items: number
           checked_items: number
+          total_spent: number | null
+          store_name: string | null
+          receipt_date: string | null
+          subtotal: number | null
+          tax: number | null
+          receipt_image_uri: string | null
         }
         Insert: {
           id?: string
@@ -140,6 +146,12 @@ export interface Database {
           completed_at?: string | null
           total_items?: number
           checked_items?: number
+          total_spent?: number | null
+          store_name?: string | null
+          receipt_date?: string | null
+          subtotal?: number | null
+          tax?: number | null
+          receipt_image_uri?: string | null
         }
         Update: {
           id?: string
@@ -149,6 +161,12 @@ export interface Database {
           completed_at?: string | null
           total_items?: number
           checked_items?: number
+          total_spent?: number | null
+          store_name?: string | null
+          receipt_date?: string | null
+          subtotal?: number | null
+          tax?: number | null
+          receipt_image_uri?: string | null
         }
       }
       list_items: {
@@ -163,6 +181,8 @@ export interface Database {
           checked: boolean
           checked_at: string | null
           created_at: string
+          price: number | null
+          added_from_receipt: boolean
         }
         Insert: {
           id?: string
@@ -175,6 +195,8 @@ export interface Database {
           checked?: boolean
           checked_at?: string | null
           created_at?: string
+          price?: number | null
+          added_from_receipt?: boolean
         }
         Update: {
           id?: string
@@ -187,6 +209,8 @@ export interface Database {
           checked?: boolean
           checked_at?: string | null
           created_at?: string
+          price?: number | null
+          added_from_receipt?: boolean
         }
       }
       user_preferences: {
