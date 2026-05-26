@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,7 @@ import {
 import { router } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../stores/useAuthStore';
+import { getCategoryForItem } from '../../lib/itemCategoryLookup';
 
 interface Template {
   id: string;
@@ -56,6 +57,10 @@ export default function CreateListScreen() {
   const [newItemName, setNewItemName] = useState('');
   const [newItemCategory, setNewItemCategory] = useState('');
   const [newItemQuantity, setNewItemQuantity] = useState('');
+
+  const newItemDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const newItemCategoryRef = useRef('');
+  useEffect(() => { newItemCategoryRef.current = newItemCategory; }, [newItemCategory]);
 
   const user = useAuthStore((state) => state.user);
 
@@ -106,6 +111,26 @@ export default function CreateListScreen() {
     );
   }
 
+  function handleNewItemNameChange(text: string) {
+    setNewItemName(text);
+    if (newItemCategoryRef.current) return;
+    if (newItemDebounceRef.current) clearTimeout(newItemDebounceRef.current);
+    if (text.trim().length < 2) return;
+    newItemDebounceRef.current = setTimeout(() => resolveNewItemCategory(text), 4000);
+  }
+
+  function handleNewItemNameBlur() {
+    if (newItemDebounceRef.current) clearTimeout(newItemDebounceRef.current);
+    if (newItemCategoryRef.current || newItemName.trim().length < 2) return;
+    resolveNewItemCategory(newItemName);
+  }
+
+  async function resolveNewItemCategory(name: string) {
+    if (newItemCategoryRef.current) return;
+    const id = await getCategoryForItem(name, categories);
+    if (id && !newItemCategoryRef.current) setNewItemCategory(id);
+  }
+
   function addCustomItem() {
     if (!newItemName.trim()) {
       Alert.alert('Error', 'Please enter an item name');
@@ -116,13 +141,14 @@ export default function CreateListScreen() {
       ...items,
       {
         item_name: newItemName.trim(),
-        category_id: newItemCategory,
+        category_id: newItemCategory || null,
         quantity: newItemQuantity.trim() || null,
         selected: true,
       },
     ]);
 
     setNewItemName('');
+    setNewItemCategory('');
     setNewItemQuantity('');
     setShowAddItem(false);
   }
@@ -162,7 +188,7 @@ export default function CreateListScreen() {
         selectedItems.map((item) => ({
           list_id: list.id,
           item_name: item.item_name,
-          category_id: item.category_id,
+          category_id: item.category_id || null,
           quantity: item.quantity,
         }))
       );
@@ -170,6 +196,8 @@ export default function CreateListScreen() {
     setCreating(false);
 
     if (itemsError) {
+      // Clean up the orphaned list so it doesn't ghost the shopping screen
+      await supabase.from('shopping_lists').delete().eq('id', list.id);
       Alert.alert('Error', itemsError.message);
     } else {
       Alert.alert('Success!', 'Shopping list created', [
@@ -186,13 +214,23 @@ export default function CreateListScreen() {
     );
   }
 
-  function startBlankList() {
-    setSelectedTemplate({
-      id: 'blank',
-      name: 'New List',
-      template_items: [],
-    });
-    setItems([]);
+  async function startBlankList() {
+    if (creating) return;
+    setCreating(true);
+    const { error } = await supabase
+      .from('shopping_lists')
+      .insert({
+        user_id: user?.id,
+        name: 'Shopping Trip',
+        total_items: 0,
+        checked_items: 0,
+      });
+    setCreating(false);
+    if (error) {
+      Alert.alert('Error', error.message);
+      return;
+    }
+    router.replace('/(tabs)');
   }
 
   // Step 1: Select template
@@ -231,7 +269,7 @@ export default function CreateListScreen() {
           {templates.length === 0 ? (
             <View style={styles.emptyTemplates}>
               <Text style={styles.emptyIcon}>📝</Text>
-              <Text style={styles.emptyText}>No templates yet</Text>
+              <Text style={styles.emptyText}>No templates are created yet. Create a template if you plan to reuse this list or a similar version often in the future.</Text>
               <TouchableOpacity
                 style={styles.createTemplateButton}
                 onPress={() => router.push('/template/create')}
@@ -360,19 +398,25 @@ export default function CreateListScreen() {
             activeOpacity={1}
             onPress={() => setShowAddItem(false)}
           />
-          <View style={styles.modalContent}>
+          <ScrollView
+            style={styles.modalContent}
+            keyboardShouldPersistTaps="handled"
+            scrollEnabled={false}
+            showsVerticalScrollIndicator={false}
+          >
             <Text style={styles.modalTitle}>Add Custom Item</Text>
 
             <TextInput
               style={styles.input}
               placeholder="Item name"
               value={newItemName}
-              onChangeText={setNewItemName}
+              onChangeText={handleNewItemNameChange}
+              onBlur={handleNewItemNameBlur}
               autoFocus
             />
 
             <Text style={styles.label}>Category</Text>
-            <ScrollView horizontal style={styles.categoryPicker}>
+            <View style={styles.categoryWrap}>
               <TouchableOpacity
                 style={[
                   styles.categoryOption,
@@ -413,7 +457,7 @@ export default function CreateListScreen() {
                   </Text>
                 </TouchableOpacity>
               ))}
-            </ScrollView>
+            </View>
 
             <Text style={styles.label}>Quantity</Text>
             <TextInput
@@ -441,7 +485,7 @@ export default function CreateListScreen() {
                 <Text style={styles.modalButtonAddText}>Add</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </ScrollView>
         </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
@@ -705,9 +749,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 16,
   },
-  categoryPicker: {
+  categoryWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
     marginBottom: 16,
-    maxHeight: 50,
   },
   categoryOption: {
     paddingHorizontal: 12,

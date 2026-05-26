@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,11 +15,15 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
+import { BlurView } from 'expo-blur';
 import { router, useFocusEffect } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
+import { Audio } from 'expo-av';
 import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../stores/useAuthStore';
 import { scanReceipt } from '../../lib/receiptScanner';
+import { requestMicPermission, startRecording, stopAndProcess } from '../../lib/voiceProcessor';
+import { getCategoryForItem } from '../../lib/itemCategoryLookup';
 
 interface ListItem {
   id: string;
@@ -61,7 +65,22 @@ export default function ShoppingScreen() {
   const [editName, setEditName] = useState('');
   const [editQuantity, setEditQuantity] = useState('');
   const [editCategoryId, setEditCategoryId] = useState<string>('');
+
+  // Voice recording state
+  const [showVoiceOverlay, setShowVoiceOverlay] = useState(false);
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
+  const recordingRef = useRef<Audio.Recording | null>(null);
+
+  // Auto-category debounce refs
+  const quickAddDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const quickAddCategoryIdRef = useRef('');
+  const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editCategoryIdRef = useRef('');
+
   const user = useAuthStore((state) => state.user);
+
+  useEffect(() => { quickAddCategoryIdRef.current = quickAddCategoryId; }, [quickAddCategoryId]);
+  useEffect(() => { editCategoryIdRef.current = editCategoryId; }, [editCategoryId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -80,8 +99,6 @@ export default function ShoppingScreen() {
 
     if (data) {
       setCategories(data);
-      const other = data.find((c) => c.name === 'Other');
-      if (other) setQuickAddCategoryId(other.id);
     }
   }
 
@@ -117,6 +134,15 @@ export default function ShoppingScreen() {
       .from('list_items')
       .select('*')
       .eq('list_id', list.id);
+
+    // Orphaned list: items insert failed during creation, leaving a shell
+    if (itemsData && itemsData.length === 0 && list.total_items > 0) {
+      await supabase.from('shopping_lists').delete().eq('id', list.id);
+      setActiveList(null);
+      setItems([]);
+      setLoading(false);
+      return;
+    }
 
     if (itemsData) {
       setItems(itemsData);
@@ -160,6 +186,27 @@ export default function ShoppingScreen() {
     if (!activeList) return;
     setTotalSpent('');
     setShowCompleteModal(true);
+  }
+
+  function deleteActiveList() {
+    if (!activeList) return;
+    Alert.alert(
+      'Delete List',
+      'Are you sure you want to delete this list? Changes cannot be undone.',
+      [
+        { text: 'No', style: 'cancel' },
+        {
+          text: 'Yes',
+          style: 'destructive',
+          onPress: async () => {
+            await supabase.from('list_items').delete().eq('list_id', activeList.id);
+            await supabase.from('shopping_lists').delete().eq('id', activeList.id);
+            setActiveList(null);
+            setItems([]);
+          },
+        },
+      ]
+    );
   }
 
   function openEditModal(item: ListItem) {
@@ -233,6 +280,7 @@ export default function ShoppingScreen() {
     }
 
     setQuickAddName('');
+    setQuickAddCategoryId('');
     setShowQuickAdd(false);
     loadActiveList();
   }
@@ -294,6 +342,99 @@ export default function ShoppingScreen() {
     setItems([]);
   }
 
+  // --- Voice input ---
+
+  async function handleMicPress() {
+    const granted = await requestMicPermission();
+    if (!granted) {
+      Alert.alert('Permission needed', 'Microphone access is required for voice input.');
+      return;
+    }
+    try {
+      recordingRef.current = await startRecording();
+      setShowVoiceOverlay(true);
+    } catch {
+      Alert.alert('Error', 'Could not start recording.');
+    }
+  }
+
+  async function handleVoiceDone() {
+    if (!recordingRef.current || !activeList) return;
+    setIsProcessingVoice(true);
+    try {
+      const categoryNames = categories.map((c) => c.name);
+      const voiceItems = await stopAndProcess(recordingRef.current, categoryNames);
+      recordingRef.current = null;
+
+      const existingNames = items.map((i) => i.item_name.toLowerCase());
+      const newItems = voiceItems.filter(
+        (vi) => vi.name.trim() && !existingNames.includes(vi.name.toLowerCase())
+      );
+
+      if (newItems.length > 0) {
+        await supabase.from('list_items').insert(
+          newItems.map((vi) => ({
+            list_id: activeList.id,
+            item_name: vi.name,
+            category_id:
+              categories.find((c) => c.name.toLowerCase() === (vi.category ?? '').toLowerCase())
+                ?.id ?? null,
+            checked: false,
+          }))
+        );
+      }
+      loadActiveList();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Voice processing failed';
+      Alert.alert('Error', message);
+    } finally {
+      setIsProcessingVoice(false);
+      setShowVoiceOverlay(false);
+    }
+  }
+
+  // --- Auto-category ---
+
+  function handleQuickAddNameChange(text: string) {
+    setQuickAddName(text);
+    if (quickAddCategoryIdRef.current) return;
+    if (quickAddDebounceRef.current) clearTimeout(quickAddDebounceRef.current);
+    if (text.trim().length < 2) return;
+    quickAddDebounceRef.current = setTimeout(() => resolveQuickAddCategory(text), 4000);
+  }
+
+  function handleQuickAddNameBlur() {
+    if (quickAddDebounceRef.current) clearTimeout(quickAddDebounceRef.current);
+    if (quickAddCategoryIdRef.current || quickAddName.trim().length < 2) return;
+    resolveQuickAddCategory(quickAddName);
+  }
+
+  async function resolveQuickAddCategory(name: string) {
+    if (quickAddCategoryIdRef.current) return;
+    const id = await getCategoryForItem(name, categories);
+    if (id && !quickAddCategoryIdRef.current) setQuickAddCategoryId(id);
+  }
+
+  function handleEditNameChange(text: string) {
+    setEditName(text);
+    if (editCategoryIdRef.current) return;
+    if (editDebounceRef.current) clearTimeout(editDebounceRef.current);
+    if (text.trim().length < 2) return;
+    editDebounceRef.current = setTimeout(() => resolveEditCategory(text), 4000);
+  }
+
+  function handleEditNameBlur() {
+    if (editDebounceRef.current) clearTimeout(editDebounceRef.current);
+    if (editCategoryIdRef.current || editName.trim().length < 2) return;
+    resolveEditCategory(editName);
+  }
+
+  async function resolveEditCategory(name: string) {
+    if (editCategoryIdRef.current) return;
+    const id = await getCategoryForItem(name, categories);
+    if (id && !editCategoryIdRef.current) setEditCategoryId(id);
+  }
+
   function organizeItemsByCategory() {
     const sections: {
       title: string;
@@ -334,9 +475,10 @@ export default function ShoppingScreen() {
   }
 
   const sections = organizeItemsByCategory();
-  const progress = activeList
-    ? Math.round((activeList.checked_items / activeList.total_items) * 100)
-    : 0;
+  const progress =
+    activeList && activeList.total_items > 0
+      ? Math.round((activeList.checked_items / activeList.total_items) * 100)
+      : 0;
 
   if (loading) {
     return (
@@ -394,18 +536,33 @@ export default function ShoppingScreen() {
         <View style={styles.header}>
           <View style={styles.headerTop}>
             <Text style={styles.title}>Shopping</Text>
-            <TouchableOpacity onPress={completeList}>
-              <Text style={styles.completeText}>Complete ✓</Text>
-            </TouchableOpacity>
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                onPress={deleteActiveList}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 8 }}
+                style={styles.deleteListButton}
+              >
+                <Text style={styles.deleteListText}>✕</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={completeList}>
+                <Text style={styles.completeText}>Complete ✓</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           <View style={styles.progressContainer}>
-            <View style={styles.progressBar}>
-              <View style={[styles.progressFill, { width: `${progress}%` }]} />
-            </View>
-            <Text style={styles.progressText}>
-              {activeList.checked_items} of {activeList.total_items} items
-            </Text>
+            {activeList.total_items > 0 ? (
+              <>
+                <View style={styles.progressBar}>
+                  <View style={[styles.progressFill, { width: `${progress}%` }]} />
+                </View>
+                <Text style={styles.progressText}>
+                  {activeList.checked_items} of {activeList.total_items} items
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.progressText}>No items yet</Text>
+            )}
           </View>
         </View>
 
@@ -467,47 +624,61 @@ export default function ShoppingScreen() {
         </Modal>
 
         <View style={styles.listContainer}>
-          <SectionList
-            sections={sections}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.itemRow}
-                onPress={() => toggleItem(item.id, item.checked)}
-                onLongPress={() => openEditModal(item)}
-                delayLongPress={400}
-              >
-                <View
-                  style={[
-                    styles.checkbox,
-                    item.checked && styles.checkboxChecked,
-                  ]}
+          {sections.length === 0 ? (
+            <View style={styles.emptyListContainer}>
+              <Text style={styles.emptyListText}>Your list is empty.</Text>
+              <Text style={styles.emptyListSubtext}>Tap + to add your first item.</Text>
+            </View>
+          ) : (
+            <SectionList
+              sections={sections}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.itemRow}
+                  onPress={() => toggleItem(item.id, item.checked)}
+                  onLongPress={() => openEditModal(item)}
+                  delayLongPress={400}
                 >
-                  {item.checked && <Text style={styles.checkmark}>✓</Text>}
-                </View>
-                <View style={styles.itemInfo}>
-                  <Text
+                  <View
                     style={[
-                      styles.itemName,
-                      item.checked && styles.itemNameChecked,
+                      styles.checkbox,
+                      item.checked && styles.checkboxChecked,
                     ]}
                   >
-                    {item.item_name}
-                  </Text>
-                  {item.quantity && (
-                    <Text style={styles.itemQuantity}>{item.quantity}</Text>
-                  )}
+                    {item.checked && <Text style={styles.checkmark}>✓</Text>}
+                  </View>
+                  <View style={styles.itemInfo}>
+                    <Text
+                      style={[
+                        styles.itemName,
+                        item.checked && styles.itemNameChecked,
+                      ]}
+                    >
+                      {item.item_name}
+                    </Text>
+                    {item.quantity && (
+                      <Text style={styles.itemQuantity}>{item.quantity}</Text>
+                    )}
+                  </View>
+                  <Text style={styles.holdHint}>hold to edit</Text>
+                </TouchableOpacity>
+              )}
+              renderSectionHeader={({ section: { title, color } }) => (
+                <View style={[styles.sectionHeader, { backgroundColor: color }]}>
+                  <Text style={styles.sectionTitle}>{title}</Text>
                 </View>
-                <Text style={styles.holdHint}>hold to edit</Text>
-              </TouchableOpacity>
-            )}
-            renderSectionHeader={({ section: { title, color } }) => (
-              <View style={[styles.sectionHeader, { backgroundColor: color }]}>
-                <Text style={styles.sectionTitle}>{title}</Text>
-              </View>
-            )}
-            contentContainerStyle={styles.list}
-          />
+              )}
+              contentContainerStyle={styles.list}
+            />
+          )}
+
+          <TouchableOpacity
+            style={styles.micFab}
+            onPress={handleMicPress}
+          >
+            <Text style={styles.micFabText}>🎤</Text>
+          </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.fab}
@@ -533,24 +704,25 @@ export default function ShoppingScreen() {
               activeOpacity={1}
               onPress={() => setShowQuickAdd(false)}
             />
-            <View style={styles.modalContent}>
+            <ScrollView
+              style={styles.modalContent}
+              keyboardShouldPersistTaps="handled"
+              scrollEnabled={false}
+              showsVerticalScrollIndicator={false}
+            >
               <Text style={styles.modalTitle}>Add Item</Text>
               <TextInput
                 style={styles.quickAddInput}
                 placeholder="Item name..."
                 value={quickAddName}
-                onChangeText={setQuickAddName}
+                onChangeText={handleQuickAddNameChange}
+                onBlur={handleQuickAddNameBlur}
                 autoFocus
                 returnKeyType="done"
                 onSubmitEditing={addQuickItem}
               />
               <Text style={styles.categoryLabel}>Category</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={styles.categoryScroll}
-                contentContainerStyle={styles.categoryScrollContent}
-              >
+              <View style={styles.categoryWrap}>
                 {categories.map((cat) => (
                   <TouchableOpacity
                     key={cat.id}
@@ -571,7 +743,7 @@ export default function ShoppingScreen() {
                     </Text>
                   </TouchableOpacity>
                 ))}
-              </ScrollView>
+              </View>
               <View style={styles.modalButtons}>
                 <TouchableOpacity
                   style={styles.modalButtonCancel}
@@ -593,9 +765,36 @@ export default function ShoppingScreen() {
                   <Text style={styles.modalButtonCompleteText}>Add Item</Text>
                 </TouchableOpacity>
               </View>
-            </View>
+            </ScrollView>
           </KeyboardAvoidingView>
         </Modal>
+        {/* Voice recording overlay */}
+        <Modal
+          visible={showVoiceOverlay}
+          animationType="fade"
+          transparent={true}
+          onRequestClose={() => {}}
+        >
+          <BlurView intensity={60} tint="dark" style={styles.voiceOverlay}>
+            {isProcessingVoice ? (
+              <View style={styles.voiceProcessingContent}>
+                <ActivityIndicator size="large" color="#ffffff" />
+                <Text style={styles.voiceProcessingText}>Building your list…</Text>
+              </View>
+            ) : (
+              <View style={styles.voiceRecordingContent}>
+                <Text style={styles.voicePulse}>🎤</Text>
+                <Text style={styles.voicePromptText}>
+                  Say the items you want to add to your list.
+                </Text>
+                <TouchableOpacity style={styles.voiceDoneButton} onPress={handleVoiceDone}>
+                  <Text style={styles.voiceDoneText}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </BlurView>
+        </Modal>
+
         {/* Scanning overlay */}
         {scanning && (
           <View style={styles.scanningOverlay}>
@@ -620,14 +819,20 @@ export default function ShoppingScreen() {
               activeOpacity={1}
               onPress={() => setShowEditModal(false)}
             />
-            <View style={styles.modalContent}>
+            <ScrollView
+              style={styles.modalContent}
+              keyboardShouldPersistTaps="handled"
+              scrollEnabled={false}
+              showsVerticalScrollIndicator={false}
+            >
               <Text style={styles.modalTitle}>Edit Item</Text>
 
               <Text style={styles.categoryLabel}>Name</Text>
               <TextInput
                 style={styles.quickAddInput}
                 value={editName}
-                onChangeText={setEditName}
+                onChangeText={handleEditNameChange}
+                onBlur={handleEditNameBlur}
                 autoFocus
                 returnKeyType="done"
               />
@@ -642,12 +847,7 @@ export default function ShoppingScreen() {
               />
 
               <Text style={styles.categoryLabel}>Category</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={styles.categoryScroll}
-                contentContainerStyle={styles.categoryScrollContent}
-              >
+              <View style={styles.categoryWrap}>
                 {categories.map((cat) => (
                   <TouchableOpacity
                     key={cat.id}
@@ -668,7 +868,7 @@ export default function ShoppingScreen() {
                     </Text>
                   </TouchableOpacity>
                 ))}
-              </ScrollView>
+              </View>
 
               <View style={styles.modalButtons}>
                 <TouchableOpacity
@@ -688,7 +888,7 @@ export default function ShoppingScreen() {
                   <Text style={styles.modalButtonCompleteText}>Save</Text>
                 </TouchableOpacity>
               </View>
-            </View>
+            </ScrollView>
           </KeyboardAvoidingView>
         </Modal>
       </SafeAreaView>
@@ -730,6 +930,19 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1f2937',
     letterSpacing: -0.5,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  deleteListButton: {
+    padding: 6,
+  },
+  deleteListText: {
+    fontSize: 14,
+    color: '#ef4444',
+    fontWeight: '700',
   },
   completeText: {
     fontSize: 15,
@@ -952,12 +1165,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginBottom: 8,
   },
-  categoryScroll: {
-    marginBottom: 20,
-  },
-  categoryScrollContent: {
+  categoryWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
-    paddingRight: 4,
+    marginBottom: 20,
   },
   categoryChip: {
     paddingHorizontal: 12,
@@ -1048,6 +1260,88 @@ const styles = StyleSheet.create({
   },
   modalButtonCompleteText: {
     fontSize: 15,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  emptyListContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#faf9f5',
+    padding: 40,
+  },
+  emptyListText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#6b7280',
+    marginBottom: 8,
+  },
+  emptyListSubtext: {
+    fontSize: 14,
+    color: '#9ca3af',
+  },
+  micFab: {
+    position: 'absolute',
+    bottom: 165,
+    right: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#f97316',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  micFabText: {
+    fontSize: 22,
+  },
+  voiceOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  voiceRecordingContent: {
+    alignItems: 'center',
+    paddingHorizontal: 40,
+  },
+  voicePulse: {
+    fontSize: 64,
+    marginBottom: 24,
+  },
+  voicePromptText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#ffffff',
+    textAlign: 'center',
+    marginBottom: 48,
+    lineHeight: 26,
+  },
+  voiceDoneButton: {
+    backgroundColor: '#ef4444',
+    borderRadius: 36,
+    paddingHorizontal: 48,
+    paddingVertical: 18,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  voiceDoneText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  voiceProcessingContent: {
+    alignItems: 'center',
+    gap: 20,
+  },
+  voiceProcessingText: {
+    fontSize: 16,
     fontWeight: '600',
     color: '#ffffff',
   },
