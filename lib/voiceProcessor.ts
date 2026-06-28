@@ -7,6 +7,7 @@ export interface VoiceItem {
 }
 
 const recordingOptions: Audio.RecordingOptions = {
+  isMeteringEnabled: true,
   ios: {
     extension: '.m4a',
     audioQuality: Audio.IOSAudioQuality.HIGH,

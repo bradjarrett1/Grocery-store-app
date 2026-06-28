@@ -22,7 +22,7 @@ import { Audio } from 'expo-av';
 import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../stores/useAuthStore';
 import { scanReceipt } from '../../lib/receiptScanner';
-import { requestMicPermission, startRecording, stopAndProcess } from '../../lib/voiceProcessor';
+import { requestMicPermission, startRecording, stopAndProcess, VoiceItem } from '../../lib/voiceProcessor';
 import { getCategoryForItem } from '../../lib/itemCategoryLookup';
 
 interface ListItem {
@@ -70,6 +70,14 @@ export default function ShoppingScreen() {
   const [showVoiceOverlay, setShowVoiceOverlay] = useState(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const [voiceAmplitudes, setVoiceAmplitudes] = useState<number[]>(new Array(50).fill(0.05));
+  const amplitudeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Voice confirm state
+  const [pendingVoiceItems, setPendingVoiceItems] = useState<VoiceItem[]>([]);
+  const [showVoiceConfirm, setShowVoiceConfirm] = useState(false);
+  const [editingVoiceIdx, setEditingVoiceIdx] = useState<number | null>(null);
+  const [editingVoiceText, setEditingVoiceText] = useState('');
 
   // Auto-category debounce refs
   const quickAddDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -81,6 +89,9 @@ export default function ShoppingScreen() {
 
   useEffect(() => { quickAddCategoryIdRef.current = quickAddCategoryId; }, [quickAddCategoryId]);
   useEffect(() => { editCategoryIdRef.current = editCategoryId; }, [editCategoryId]);
+  useEffect(() => {
+    return () => { if (amplitudeTimerRef.current) clearInterval(amplitudeTimerRef.current); };
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -344,6 +355,25 @@ export default function ShoppingScreen() {
 
   // --- Voice input ---
 
+  function startAmplitudePolling(rec: Audio.Recording) {
+    if (amplitudeTimerRef.current) clearInterval(amplitudeTimerRef.current);
+    amplitudeTimerRef.current = setInterval(async () => {
+      try {
+        const status = await rec.getStatusAsync();
+        const db = (status as unknown as { metering?: number }).metering ?? -60;
+        const amp = Math.max(0, Math.min(1, (db + 40) / 35));
+        setVoiceAmplitudes((prev) => [...prev.slice(1), amp]);
+      } catch {}
+    }, 80);
+  }
+
+  function stopAmplitudePolling() {
+    if (amplitudeTimerRef.current) {
+      clearInterval(amplitudeTimerRef.current);
+      amplitudeTimerRef.current = null;
+    }
+  }
+
   async function handleMicPress() {
     const granted = await requestMicPermission();
     if (!granted) {
@@ -352,14 +382,27 @@ export default function ShoppingScreen() {
     }
     try {
       recordingRef.current = await startRecording();
+      setVoiceAmplitudes(new Array(50).fill(0.05));
+      startAmplitudePolling(recordingRef.current);
       setShowVoiceOverlay(true);
     } catch {
       Alert.alert('Error', 'Could not start recording.');
     }
   }
 
+  async function cancelVoice() {
+    stopAmplitudePolling();
+    if (recordingRef.current) {
+      try { await recordingRef.current.stopAndUnloadAsync(); } catch {}
+      recordingRef.current = null;
+    }
+    setShowVoiceOverlay(false);
+    setIsProcessingVoice(false);
+  }
+
   async function handleVoiceDone() {
     if (!recordingRef.current || !activeList) return;
+    stopAmplitudePolling();
     setIsProcessingVoice(true);
     try {
       const categoryNames = categories.map((c) => c.name);
@@ -371,26 +414,68 @@ export default function ShoppingScreen() {
         (vi) => vi.name.trim() && !existingNames.includes(vi.name.toLowerCase())
       );
 
+      setPendingVoiceItems(newItems);
+      setIsProcessingVoice(false);
+      setShowVoiceOverlay(false);
       if (newItems.length > 0) {
-        await supabase.from('list_items').insert(
-          newItems.map((vi) => ({
-            list_id: activeList.id,
-            item_name: vi.name,
-            category_id:
-              categories.find((c) => c.name.toLowerCase() === (vi.category ?? '').toLowerCase())
-                ?.id ?? null,
-            checked: false,
-          }))
-        );
+        setShowVoiceConfirm(true);
+      } else {
+        Alert.alert('No items found', 'No new grocery items were detected.');
       }
-      loadActiveList();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Voice processing failed';
       Alert.alert('Error', message);
-    } finally {
       setIsProcessingVoice(false);
       setShowVoiceOverlay(false);
     }
+  }
+
+  async function confirmVoiceItems() {
+    if (!activeList || pendingVoiceItems.length === 0) return;
+    await supabase.from('list_items').insert(
+      pendingVoiceItems.map((vi) => ({
+        list_id: activeList.id,
+        item_name: vi.name,
+        category_id:
+          categories.find((c) => c.name.toLowerCase() === (vi.category ?? '').toLowerCase())?.id ?? null,
+        checked: false,
+      }))
+    );
+    setShowVoiceConfirm(false);
+    setPendingVoiceItems([]);
+    loadActiveList();
+  }
+
+  function cancelVoiceConfirm() {
+    setShowVoiceConfirm(false);
+    setPendingVoiceItems([]);
+  }
+
+  function saveVoiceItemEdit() {
+    if (editingVoiceIdx === null) return;
+    const text = editingVoiceText.trim();
+    setPendingVoiceItems((prev) =>
+      text
+        ? prev.map((item, i) => (i === editingVoiceIdx ? { ...item, name: text } : item))
+        : prev.filter((_, i) => i !== editingVoiceIdx)
+    );
+    setEditingVoiceIdx(null);
+    setEditingVoiceText('');
+  }
+
+  function groupPendingItems() {
+    const result: { title: string; color: string; items: { item: VoiceItem; idx: number }[] }[] = [];
+    for (const cat of categories) {
+      const catItems = pendingVoiceItems
+        .map((item, idx) => ({ item, idx }))
+        .filter(({ item }) => item.category?.toLowerCase() === cat.name.toLowerCase());
+      if (catItems.length > 0) result.push({ title: cat.name, color: cat.color, items: catItems });
+    }
+    const uncatItems = pendingVoiceItems
+      .map((item, idx) => ({ item, idx }))
+      .filter(({ item }) => !item.category || !categories.some((c) => c.name.toLowerCase() === item.category?.toLowerCase()));
+    if (uncatItems.length > 0) result.push({ title: 'Other', color: '#6b7280', items: uncatItems });
+    return result;
   }
 
   // --- Auto-category ---
@@ -768,30 +853,130 @@ export default function ShoppingScreen() {
             </ScrollView>
           </KeyboardAvoidingView>
         </Modal>
-        {/* Voice recording overlay */}
+        {/* Voice recording overlay — floating card */}
         <Modal
           visible={showVoiceOverlay}
           animationType="fade"
           transparent={true}
-          onRequestClose={() => {}}
+          onRequestClose={cancelVoice}
         >
-          <BlurView intensity={60} tint="dark" style={styles.voiceOverlay}>
-            {isProcessingVoice ? (
-              <View style={styles.voiceProcessingContent}>
-                <ActivityIndicator size="large" color="#ffffff" />
-                <Text style={styles.voiceProcessingText}>Building your list…</Text>
-              </View>
-            ) : (
-              <View style={styles.voiceRecordingContent}>
-                <Text style={styles.voicePulse}>🎤</Text>
-                <Text style={styles.voicePromptText}>
-                  Say the items you want to add to your list.
+          <View style={styles.voiceModalBg}>
+            <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={cancelVoice} />
+            <View style={styles.voiceCard}>
+              {isProcessingVoice ? (
+                <View style={styles.voiceProcessingContent}>
+                  <ActivityIndicator size="large" color="#10b981" />
+                  <Text style={styles.voiceProcessingText}>Building your list…</Text>
+                </View>
+              ) : (
+                <>
+                  <View style={styles.voiceCardHeader}>
+                    <View style={styles.voiceMicCircle}>
+                      <Text style={{ fontSize: 20 }}>🎤</Text>
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <Text style={styles.voiceCardTitle}>Recording...</Text>
+                      <Text style={styles.voiceCardSubtitle}>Speak your items</Text>
+                    </View>
+                    <TouchableOpacity onPress={cancelVoice} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Text style={styles.voiceCloseIcon}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.waveformContainer}>
+                    {voiceAmplitudes.map((amp, i) => (
+                      <View
+                        key={i}
+                        style={[styles.waveBar, {
+                          height: Math.max(3, Math.round(amp * 44)),
+                          opacity: amp < 0.08 ? 0.3 : 1,
+                        }]}
+                      />
+                    ))}
+                  </View>
+
+                  <Text style={styles.voiceStatusText}>
+                    {'🌿 '}
+                    {voiceAmplitudes.slice(-5).reduce((a, b) => a + b, 0) / 5 > 0.2
+                      ? 'Great! Keep going...'
+                      : 'Listening for your next item...'}
+                  </Text>
+
+                  <TouchableOpacity style={styles.voiceDoneButton} onPress={handleVoiceDone}>
+                    <Text style={styles.voiceDoneText}>Done</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+        </Modal>
+
+        {/* Voice confirm sheet — iOS blur overlay, grouped by category */}
+        <Modal
+          visible={showVoiceConfirm}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={cancelVoiceConfirm}
+        >
+          <BlurView intensity={25} tint="dark" style={{ flex: 1 }}>
+            <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={cancelVoiceConfirm} />
+            <KeyboardAvoidingView
+              behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+              style={styles.voiceConfirmOuter}
+            >
+              <View style={styles.voiceConfirmSheet}>
+                <View style={styles.sheetHandle} />
+                <Text style={styles.voiceConfirmTitle}>
+                  {pendingVoiceItems.length} item{pendingVoiceItems.length !== 1 ? 's' : ''} found
                 </Text>
-                <TouchableOpacity style={styles.voiceDoneButton} onPress={handleVoiceDone}>
-                  <Text style={styles.voiceDoneText}>Done</Text>
-                </TouchableOpacity>
+                <ScrollView
+                  style={styles.voiceConfirmScroll}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  {groupPendingItems().map((group) => (
+                    <View key={group.title}>
+                      <View style={[styles.voiceConfirmSection, { backgroundColor: group.color }]}>
+                        <Text style={styles.voiceConfirmSectionTitle}>{group.title}</Text>
+                      </View>
+                      {group.items.map(({ item, idx }) => (
+                        <View key={idx} style={styles.voiceConfirmItemRow}>
+                          {editingVoiceIdx === idx ? (
+                            <TextInput
+                              style={styles.voiceConfirmItemEdit}
+                              value={editingVoiceText}
+                              onChangeText={setEditingVoiceText}
+                              autoFocus
+                              returnKeyType="done"
+                              onSubmitEditing={saveVoiceItemEdit}
+                              onBlur={saveVoiceItemEdit}
+                            />
+                          ) : (
+                            <>
+                              <Text style={styles.voiceConfirmItemName}>{item.name}</Text>
+                              <TouchableOpacity
+                                onPress={() => { setEditingVoiceIdx(idx); setEditingVoiceText(item.name); }}
+                                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                              >
+                                <Text style={styles.voiceEditIcon}>✏️</Text>
+                              </TouchableOpacity>
+                            </>
+                          )}
+                        </View>
+                      ))}
+                    </View>
+                  ))}
+                </ScrollView>
+                <View style={styles.voiceConfirmButtons}>
+                  <TouchableOpacity style={styles.voiceConfirmCancel} onPress={cancelVoiceConfirm}>
+                    <Text style={styles.voiceConfirmCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.voiceConfirmAdd} onPress={confirmVoiceItems}>
+                    <Text style={styles.voiceConfirmAddText}>Add to List</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-            )}
+            </KeyboardAvoidingView>
           </BlurView>
         </Modal>
 
@@ -1299,49 +1484,199 @@ const styles = StyleSheet.create({
   micFabText: {
     fontSize: 22,
   },
-  voiceOverlay: {
+
+  // Voice recording — floating card
+  voiceModalBg: {
     flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'flex-start',
+    paddingTop: 64,
+    paddingHorizontal: 20,
+  },
+  voiceCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  voiceCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  voiceMicCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#f0fdf4',
     justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#d1fae5',
   },
-  voiceRecordingContent: {
-    alignItems: 'center',
-    paddingHorizontal: 40,
+  voiceCardTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1f2937',
   },
-  voicePulse: {
-    fontSize: 64,
-    marginBottom: 24,
+  voiceCardSubtitle: {
+    fontSize: 13,
+    color: '#6b7280',
+    marginTop: 1,
   },
-  voicePromptText: {
+  voiceCloseIcon: {
     fontSize: 18,
+    color: '#9ca3af',
     fontWeight: '600',
-    color: '#ffffff',
-    textAlign: 'center',
-    marginBottom: 48,
-    lineHeight: 26,
+  },
+  waveformContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 56,
+    gap: 2,
+    marginBottom: 10,
+  },
+  waveBar: {
+    flex: 1,
+    borderRadius: 2,
+    backgroundColor: '#10b981',
+  },
+  voiceStatusText: {
+    fontSize: 13,
+    color: '#6b7280',
+    marginBottom: 16,
   },
   voiceDoneButton: {
-    backgroundColor: '#ef4444',
-    borderRadius: 36,
-    paddingHorizontal: 48,
-    paddingVertical: 18,
-    shadowColor: '#ef4444',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-    elevation: 8,
+    backgroundColor: '#10b981',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    shadowColor: '#10b981',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   voiceDoneText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#ffffff',
   },
   voiceProcessingContent: {
     alignItems: 'center',
-    gap: 20,
+    paddingVertical: 24,
+    gap: 16,
   },
   voiceProcessingText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#374151',
+  },
+
+  // Voice confirm sheet
+  voiceConfirmOuter: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  voiceConfirmSheet: {
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingTop: 12,
+    paddingHorizontal: 20,
+    paddingBottom: 40,
+    maxHeight: '72%',
+  },
+  sheetHandle: {
+    width: 36,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#d1d5db',
+    alignSelf: 'center',
+    marginBottom: 18,
+  },
+  voiceConfirmTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginBottom: 12,
+  },
+  voiceConfirmScroll: {
+    maxHeight: 360,
+  },
+  voiceConfirmSection: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    marginTop: 14,
+    marginBottom: 2,
+    alignSelf: 'flex-start',
+  },
+  voiceConfirmSectionTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#ffffff',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  voiceConfirmItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 13,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  voiceConfirmItemName: {
+    flex: 1,
+    fontSize: 15,
+    color: '#1f2937',
+    fontWeight: '500',
+  },
+  voiceConfirmItemEdit: {
+    flex: 1,
+    fontSize: 15,
+    color: '#1f2937',
+    fontWeight: '500',
+    borderBottomWidth: 1.5,
+    borderBottomColor: '#10b981',
+    paddingVertical: 2,
+    marginRight: 8,
+  },
+  voiceEditIcon: {
     fontSize: 16,
+    paddingLeft: 8,
+  },
+  voiceConfirmButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 20,
+  },
+  voiceConfirmCancel: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: '#d1d5db',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  voiceConfirmCancelText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  voiceConfirmAdd: {
+    flex: 2,
+    backgroundColor: '#10b981',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  voiceConfirmAddText: {
+    fontSize: 15,
     fontWeight: '600',
     color: '#ffffff',
   },
