@@ -16,6 +16,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { Audio } from 'expo-av';
@@ -762,7 +763,7 @@ export default function ShoppingScreen() {
             style={styles.micFab}
             onPress={handleMicPress}
           >
-            <Text style={styles.micFabText}>🎤</Text>
+            <Ionicons name="mic" size={26} color="#ffffff" />
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -872,7 +873,7 @@ export default function ShoppingScreen() {
                 <>
                   <View style={styles.voiceCardHeader}>
                     <View style={styles.voiceMicCircle}>
-                      <Text style={{ fontSize: 20 }}>🎤</Text>
+                      <Ionicons name="mic" size={20} color="#10b981" />
                     </View>
                     <View style={{ flex: 1, marginLeft: 12 }}>
                       <Text style={styles.voiceCardTitle}>Recording...</Text>
@@ -1480,9 +1481,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 8,
     elevation: 8,
-  },
-  micFabText: {
-    fontSize: 22,
   },
 
   // Voice recording — floating card
